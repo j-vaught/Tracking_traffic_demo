@@ -1,0 +1,36 @@
+# Data (video is ~1.5 GB)
+data/*
+!data/.gitkeep
+
+# Model weights
+weights/
+*.pt
+*.pth
+*.safetensors
+*.onnx
+
+# Upstream research repos cloned by scripts/setup.sh
+trackers/boosttrack/
+trackers/lorat/
+
+# Virtual envs
+.venv*/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build / packaging
+*.egg-info/
+build/
+dist/
+
+# Tooling
+.idea/
+.vscode/
+.DS_Store
+
+# Experiment outputs
+runs/
+results/
+wandb/
+outputs/
