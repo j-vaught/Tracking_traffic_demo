@@ -13,6 +13,9 @@ weights/
 trackers/boosttrack/
 trackers/lorat/
 
+# Fetched via scripts/setup.sh (libjpeg-turbo binary)
+vendor/
+
 # Virtual envs
 .venv*/
 __pycache__/

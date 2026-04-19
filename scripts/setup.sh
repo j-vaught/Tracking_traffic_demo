@@ -67,4 +67,9 @@ print(f'  .venv-$v: torch={torch.__version__} cuda={torch.cuda.is_available()} g
 "
 done
 
-log "done. Next: bash scripts/download_weights.sh all"
+log "fetching libjpeg-turbo 3.1.0 into vendor/ (LoRAT needs libturbojpeg.so; no sudo)"
+bash "$ROOT/scripts/download_weights.sh" turbojpeg
+
+log "done. Next: bash scripts/download_weights.sh all  (weights ≈ 10 GB)"
+log "When running LoRAT, export:"
+log "  LD_LIBRARY_PATH=\$ROOT/vendor/prefix/opt/libjpeg-turbo/lib64:\$LD_LIBRARY_PATH"
