@@ -8,6 +8,8 @@ weights/
 *.pth
 *.safetensors
 *.onnx
+*.engine
+*.trt
 
 # Upstream research repos cloned by scripts/setup.sh
 trackers/boosttrack/
