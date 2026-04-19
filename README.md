@@ -11,7 +11,7 @@ Comparison playground for four current-gen (2025–2026) detection and tracking 
 | Role | Model | Variant | Reference | Released |
 |---|---|---|---|---|
 | Detector | **YOLO26** | `yolo26x` (57.5 COCO mAP, 55.7M params) | [Ultralytics](https://docs.ultralytics.com/models/yolo26/) | 2026-01-14 |
-| Detector | **RF-DETR** | `RFDETR2XL` (60.1 COCO AP50:95, SOTA real-time DETR) | [roboflow/rf-detr](https://github.com/roboflow/rf-detr) | 2026-04-10 (v1.6.4) |
+| Detector | **RF-DETR** | `RFDETR2XLarge` (60.1 COCO AP50:95, SOTA real-time DETR) | [roboflow/rf-detr](https://github.com/roboflow/rf-detr) | 2026-04-10 (v1.6.4) |
 | Tracker (MOT) | **BoostTrack++** | [paper](https://arxiv.org/abs/2408.13003) | [vukasin-stanojevic/BoostTrack](https://github.com/vukasin-stanojevic/BoostTrack) | 2025-08 |
 | Tracker (SOT) | **LoRATv2** | `g-378` (largest variant) — NeurIPS 2025 Spotlight | [LitingLin/LoRAT](https://github.com/LitingLin/LoRAT) | 2025-12-05 |
 
@@ -71,8 +71,8 @@ YOLO26x and RF-DETR 2XL download automatically through their Python libraries. B
     YOLO('weights/yolo26x.pt').predict('data/IMG_2327.MOV', save=True, stream=False, vid_stride=60)"
 
 # RF-DETR 2XL on one frame
-.venv-detectors/bin/python -c "from rfdetr import RFDETR2XL; \
-    print(RFDETR2XL().predict('data/IMG_2327.MOV'))"
+.venv-detectors/bin/python -c "from rfdetr import RFDETR2XLarge; \
+    print(RFDETR2XLarge().predict('data/IMG_2327.MOV'))"
 ```
 
 ## Licensing
@@ -85,7 +85,7 @@ This project's own code is MIT. **Upstream component licenses vary**:
 - **BoostTrack** — MIT.
 - **LoRAT** — MIT.
 
-If you need a fully Apache/MIT runtime, swap `RFDETR2XL` → `RFDETRLarge` in the detector runner.
+If you need a fully Apache/MIT runtime, swap `RFDETR2XLarge` → `RFDETRLarge` in the detector runner.
 
 ## References
 

@@ -29,9 +29,9 @@ PY
 dl_rfdetr_2xl() {
   echo "[rf-detr-2xl] downloading via rfdetr..."
   "$ROOT/.venv-detectors/bin/python" - <<'PY'
-from rfdetr import RFDETR2XL
-m = RFDETR2XL()
-print("RF-DETR 2XL loaded; weights cached in ~/.cache")
+from rfdetr import RFDETR2XLarge
+m = RFDETR2XLarge()
+print("RF-DETR 2XLarge loaded; weights cached under ~/.cache")
 PY
 }
 

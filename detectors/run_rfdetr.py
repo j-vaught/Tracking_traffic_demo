@@ -3,7 +3,7 @@ import argparse, json, os
 from pathlib import Path
 
 import cv2
-from rfdetr import RFDETR2XL, RFDETRLarge
+from rfdetr import RFDETR2XLarge, RFDETRLarge  # noqa: F401  (XLarge/2XLarge via [plus])
 
 
 def main():
@@ -16,7 +16,7 @@ def main():
     args = ap.parse_args()
 
     Path(args.out).mkdir(parents=True, exist_ok=True)
-    model = (RFDETR2XL if args.variant == "2xl" else RFDETRLarge)()
+    model = (RFDETR2XLarge if args.variant == "2xl" else RFDETRLarge)()
 
     cap = cv2.VideoCapture(args.video)
     if not cap.isOpened():

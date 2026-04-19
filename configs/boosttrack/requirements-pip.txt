@@ -21,3 +21,9 @@ matplotlib
 motmetrics
 yacs==0.1.8
 cython_bbox
+torchreid
+tensorboard
+termcolor
+fvcore
+iopath
+easydict
