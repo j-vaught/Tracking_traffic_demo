@@ -49,7 +49,11 @@ def main():
                     help="Comma-separated GPU indices")
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--conf", type=float, default=0.3)
-    ap.add_argument("--classes", type=int, nargs="*", default=[0, 2])
+    ap.add_argument("--classes", type=int, nargs="*", default=[0, 1, 2, 3, 5, 7],
+                    help="COCO IDs. Default: person+all road vehicles "
+                         "(0 person, 1 bicycle, 2 car, 3 motorcycle, 5 bus, 7 truck)")
+    ap.add_argument("--color-conf", action="store_true",
+                    help="Draw boxes only (no label), color by confidence brackets")
     ap.add_argument("--engine", default=None)
     ap.add_argument("--fp16", action="store_true", default=True)
     ap.add_argument("--no-fp16", dest="fp16", action="store_false")
@@ -94,6 +98,8 @@ def main():
             cmd += ["--classes", *map(str, args.classes)]
         if not args.fp16:
             cmd.append("--no-fp16")
+        if args.color_conf:
+            cmd.append("--color-conf")
         if args.engine:
             cmd += ["--engine", args.engine]
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": g}

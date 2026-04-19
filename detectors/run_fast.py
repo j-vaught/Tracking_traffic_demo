@@ -18,13 +18,42 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# YOLO / Ultralytics: 0-based contiguous 80 classes.
 COCO_NAMES = {0: "person", 1: "bicycle", 2: "car", 3: "motorcycle",
               5: "bus", 6: "train", 7: "truck"}
+
+# RF-DETR returns raw COCO-91 IDs (1-based, with gaps). Only the classes we
+# care about for a traffic demo are listed here; extend as needed.
+COCO_91_NAMES = {1: "person", 2: "bicycle", 3: "car", 4: "motorcycle",
+                 5: "airplane", 6: "bus", 7: "train", 8: "truck",
+                 9: "boat", 10: "traffic light", 11: "fire hydrant"}
+
+# Translate a COCO-80 id (what the user passes via --classes, YOLO convention)
+# to its COCO-91 id (what RF-DETR returns). Identity for classes 0..10; beyond
+# that requires the full table if you start filtering other classes.
+COCO80_TO_91 = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 9,
+                9: 10, 10: 11}
 
 
 def color_for_class(cid):
     rng = np.random.default_rng(cid * 1337 + 7)
     return tuple(int(c) for c in rng.integers(64, 255, size=3))
+
+
+# BGR. Bracket thresholds are inclusive of the lower edge.
+# Adjust these in one place if the brackets change later.
+CONF_BRACKETS = (
+    (0.75, (0, 255, 0)),    # green  : score >= 0.75
+    (0.35, (0, 255, 255)),  # yellow : 0.35 <= score < 0.75
+    (0.10, (0, 0, 255)),    # red    : 0.10 <= score < 0.35
+)
+
+
+def color_for_conf(score):
+    for threshold, color in CONF_BRACKETS:
+        if score >= threshold:
+            return color
+    return None  # below the lowest bracket -> don't draw
 
 
 def draw_box(frame, x1, y1, x2, y2, label, color):
@@ -34,6 +63,10 @@ def draw_box(frame, x1, y1, x2, y2, label, color):
                   (int(x1) + tw + 2, int(y1)), color, -1)
     cv2.putText(frame, label, (int(x1) + 1, int(y1) - 3),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+
+
+def draw_box_only(frame, x1, y1, x2, y2, color):
+    cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
 
 
 def iter_frames(video, start, end):
@@ -88,8 +121,13 @@ def run_yolo(args):
                     score = float(b.conf.item())
                     x1, y1, x2, y2 = [float(x) for x in b.xyxy[0].tolist()]
                     name = COCO_NAMES.get(cid, str(cid))
-                    draw_box(frame, x1, y1, x2, y2, f"{name} {score:.2f}",
-                             color_for_class(cid))
+                    if args.color_conf:
+                        color = color_for_conf(score)
+                        if color is not None:
+                            draw_box_only(frame, x1, y1, x2, y2, color)
+                    else:
+                        draw_box(frame, x1, y1, x2, y2, f"{name} {score:.2f}",
+                                 color_for_class(cid))
                     boxes.append({"cls": cid, "name": name, "conf": score,
                                   "xyxy": [x1, y1, x2, y2]})
             records.append({"frame": idx, "boxes": boxes})
@@ -128,7 +166,8 @@ def run_rfdetr(args):
     writer = cv2.VideoWriter(args.out, cv2.VideoWriter_fourcc(*"mp4v"),
                              fps, (w, h))
     records = []
-    classes_set = set(args.classes) if args.classes else None
+    # Translate user's YOLO-convention (COCO-80) class IDs -> RF-DETR's COCO-91.
+    classes_set = {COCO80_TO_91.get(c, c) for c in args.classes} if args.classes else None
     batch_frames, batch_indices = [], []
     t0 = time.time()
 
@@ -151,9 +190,15 @@ def run_rfdetr(args):
                         continue
                     score = float(dets.confidence[j])
                     x1, y1, x2, y2 = [float(x) for x in dets.xyxy[j]]
-                    name = COCO_NAMES.get(cid, str(cid))
-                    draw_box(frame, x1, y1, x2, y2,
-                             f"{name} {score:.2f}", color_for_class(cid))
+                    # RF-DETR uses COCO-91 IDs; name via the matching table.
+                    name = COCO_91_NAMES.get(cid, str(cid))
+                    if args.color_conf:
+                        color = color_for_conf(score)
+                        if color is not None:
+                            draw_box_only(frame, x1, y1, x2, y2, color)
+                    else:
+                        draw_box(frame, x1, y1, x2, y2,
+                                 f"{name} {score:.2f}", color_for_class(cid))
                     boxes.append({"cls": cid, "name": name, "conf": score,
                                   "xyxy": [x1, y1, x2, y2]})
             records.append({"frame": idx, "boxes": boxes})
@@ -184,7 +229,11 @@ def main():
     ap.add_argument("--end", type=int, required=True)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--conf", type=float, default=0.3)
-    ap.add_argument("--classes", type=int, nargs="*", default=[0, 2])
+    ap.add_argument("--classes", type=int, nargs="*", default=[0, 1, 2, 3, 5, 7],
+                    help="COCO class IDs. Default: person+all road vehicles "
+                         "(0 person, 1 bicycle, 2 car, 3 motorcycle, 5 bus, 7 truck)")
+    ap.add_argument("--color-conf", action="store_true",
+                    help="Draw boxes only (no label), color by confidence brackets")
     ap.add_argument("--fp16", action="store_true", default=True)
     ap.add_argument("--no-fp16", dest="fp16", action="store_false")
     ap.add_argument("--engine", default=None,
