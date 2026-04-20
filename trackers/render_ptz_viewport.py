@@ -38,6 +38,21 @@ SCALE_X = SRC_W / MAIN_W          # 3.0
 SCALE_Y = SRC_H / MAIN_H          # 1.6875
 
 
+# Same brackets the detector color videos use: green/yellow/red by conf.
+CONF_BRACKETS = (
+    (0.75, (0, 255, 0)),    # green
+    (0.35, (0, 255, 255)),  # yellow
+    (0.10, (0, 0, 255)),    # red
+)
+
+
+def color_for_conf(score):
+    for threshold, color in CONF_BRACKETS:
+        if score >= threshold:
+            return color
+    return None
+
+
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
@@ -324,23 +339,24 @@ def main():
                              interpolation=cv2.INTER_LANCZOS4)
 
         # --- Verify planner: run YOLO on the displayed viewport crop ---
-        # Run whenever we're on a target OR panning (so in-transit tracks can
-        # also opportunistically verify).
+        # Always run so we can show color-coded boxes on the viewport too.
         max_conf = 0.0
         transit_hits: list[str] = []
-        if yolo is not None and (current_target is not None or len(active) > 0):
+        all_dets_yolo = []   # list of (xyxy_640, conf) — all dets at conf>=0.10
+        if yolo is not None:
             crop_yolo = out if (args.out_w, args.out_h) == (640, 640) else \
                 cv2.resize(out, (640, 640))
+            # Lowered floor to 0.10 so we can draw red-bracket boxes too.
             r = yolo.predict(crop_yolo, classes=args.classes,
-                             conf=0.30, imgsz=640, half=True, verbose=False)[0]
-            # Collect high-conf dets.
-            dets = []                    # list of (xyxy, conf)
+                             conf=0.10, imgsz=640, half=True, verbose=False)[0]
             if r.boxes is not None and len(r.boxes) > 0:
                 max_conf = float(r.boxes.conf.max().item())
                 for b in r.boxes:
                     c = float(b.conf.item())
-                    if c >= args.verify_conf:
-                        dets.append((tuple(b.xyxy[0].tolist()), c))
+                    all_dets_yolo.append(
+                        (tuple(float(x) for x in b.xyxy[0].tolist()), c))
+            # Verify threshold = only boxes above verify_conf feed in-transit.
+            dets = [(xy, c) for (xy, c) in all_dets_yolo if c >= args.verify_conf]
             # For every unvisited alive track (including current target),
             # see if it projects into the current viewport and matches a
             # high-conf detection there.
@@ -370,6 +386,19 @@ def main():
                         transit_hits.append(tid)
                 else:
                     consec[tid] = 0
+
+        # Draw YOLO detections on the viewport, colored by conf bracket.
+        if all_dets_yolo:
+            sx = args.out_w / 640
+            sy = args.out_h / 640
+            for (dx1, dy1, dx2, dy2), dc in all_dets_yolo:
+                col = color_for_conf(dc)
+                if col is None:
+                    continue
+                cv2.rectangle(out,
+                              (int(round(dx1 * sx)), int(round(dy1 * sy))),
+                              (int(round(dx2 * sx)), int(round(dy2 * sy))),
+                              col, 2)
 
         if args.overlay:
             label = f"PTZ  f={fidx}  visited={len(visited)}/{len(per_track)}  "
