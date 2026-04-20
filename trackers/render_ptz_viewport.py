@@ -108,6 +108,12 @@ def main():
                     help="Target box area fraction of viewport (0..1)")
     ap.add_argument("--switch-cooldown", type=int, default=60,
                     help="Minimum frames to hold on a track before switching")
+    ap.add_argument("--planner", choices=["sticky", "coverage"], default="coverage",
+                    help="sticky: follow the longest-lived track; "
+                         "coverage: visit each track once then move on")
+    ap.add_argument("--min-hold", type=int, default=120,
+                    help="Coverage planner: frames to linger on a track before "
+                         "marking it visited and moving to the next unvisited")
     ap.add_argument("--overlay", action="store_true", default=True,
                     help="Draw a small track-id tag on the viewport")
     ap.add_argument("--no-overlay", dest="overlay", action="store_false")
@@ -148,6 +154,7 @@ def main():
     state = list(wide_target(out_aspect))  # [cx, cy, crop_w, crop_h]
     current_target: str | None = None
     frames_on_current = 0
+    visited: set[str] = set()
 
     t0 = time.time()
     for fidx in range(total):
@@ -156,21 +163,39 @@ def main():
             break
 
         active = by_frame_active.get(fidx, [])
-        # Pick target: keep current if still alive + hasn't exceeded sticky
-        # behavior, else switch to the one with the most frames remaining.
+        # Drop current if the track is no longer alive this frame.
         if current_target is not None and current_target not in active:
+            # Track died while we were still on it — count it as visited.
+            visited.add(current_target)
             current_target = None
             frames_on_current = 0
 
-        if active:
-            candidates = active
-            if current_target in candidates and frames_on_current < args.switch_cooldown:
-                pass  # hold
-            else:
-                def rem(tid: str) -> int:
-                    return per_track[tid]["died"] - fidx
-                current_target = max(candidates, key=rem)
+        if args.planner == "coverage":
+            # Once we've lingered long enough, mark visited and free up target.
+            if current_target is not None and frames_on_current >= args.min_hold:
+                visited.add(current_target)
+                current_target = None
                 frames_on_current = 0
+            if current_target is None and active:
+                # Pick next unvisited track with the most life remaining, so
+                # we're likely to actually hold it for min_hold frames.
+                unvisited = [t for t in active if t not in visited]
+                if unvisited:
+                    def rem(tid: str) -> int:
+                        return per_track[tid]["died"] - fidx
+                    current_target = max(unvisited, key=rem)
+                    frames_on_current = 0
+                # If all visible are visited: current_target stays None
+                # -> EMA pans back to wide view until a new unvisited shows up.
+        else:  # sticky
+            if active:
+                if current_target in active and frames_on_current < args.switch_cooldown:
+                    pass
+                else:
+                    def rem(tid: str) -> int:
+                        return per_track[tid]["died"] - fidx
+                    current_target = max(active, key=rem)
+                    frames_on_current = 0
 
         if current_target is not None:
             entry = per_track[current_target]["hist"].get(str(fidx))
@@ -202,7 +227,7 @@ def main():
 
         if args.overlay:
             # Small tag in the top-left
-            label = f"PTZ  f={fidx}  "
+            label = f"PTZ  f={fidx}  visited={len(visited)}/{len(per_track)}  "
             label += f"track#{current_target}" if current_target else "SCANNING"
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
             cv2.rectangle(out, (8, 8), (8 + tw + 10, 8 + th + 10), (0, 0, 0), -1)
