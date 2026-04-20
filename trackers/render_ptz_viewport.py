@@ -108,12 +108,26 @@ def main():
                     help="Target box area fraction of viewport (0..1)")
     ap.add_argument("--switch-cooldown", type=int, default=60,
                     help="Minimum frames to hold on a track before switching")
-    ap.add_argument("--planner", choices=["sticky", "coverage"], default="coverage",
+    ap.add_argument("--planner", choices=["sticky", "coverage", "verify"],
+                    default="verify",
                     help="sticky: follow the longest-lived track; "
-                         "coverage: visit each track once then move on")
+                         "coverage: visit each track for fixed min-hold; "
+                         "verify: hold until N consecutive YOLO frames clear "
+                         "conf-bar OR max-hold hits")
     ap.add_argument("--min-hold", type=int, default=120,
-                    help="Coverage planner: frames to linger on a track before "
-                         "marking it visited and moving to the next unvisited")
+                    help="Coverage planner only: frames to linger")
+    ap.add_argument("--max-hold", type=int, default=180,
+                    help="Verify planner: give up on a track after this many "
+                         "frames if we haven't hit the consecutive threshold "
+                         "(120 fps source -> 180 frames ~= 1.5 s)")
+    ap.add_argument("--verify-consec", type=int, default=5,
+                    help="Verify planner: require N consecutive frames above "
+                         "the conf threshold")
+    ap.add_argument("--verify-conf", type=float, default=0.85,
+                    help="Verify planner: YOLO conf threshold")
+    ap.add_argument("--yolo-weights", default="weights/yolo26x.pt")
+    ap.add_argument("--classes", type=int, nargs="*",
+                    default=[0, 1, 2, 3, 5, 7])
     ap.add_argument("--overlay", action="store_true", default=True,
                     help="Draw a small track-id tag on the viewport")
     ap.add_argument("--no-overlay", dest="overlay", action="store_false")
@@ -154,7 +168,15 @@ def main():
     state = list(wide_target(out_aspect))  # [cx, cy, crop_w, crop_h]
     current_target: str | None = None
     frames_on_current = 0
+    consec_good = 0
     visited: set[str] = set()
+    verify_reason: dict[str, str] = {}   # tid -> "verified" / "timeout" / "lost"
+
+    # YOLO for the verify planner only.
+    yolo = None
+    if args.planner == "verify":
+        from ultralytics import YOLO
+        yolo = YOLO(args.yolo_weights)
 
     t0 = time.time()
     for fidx in range(total):
@@ -165,28 +187,39 @@ def main():
         active = by_frame_active.get(fidx, [])
         # Drop current if the track is no longer alive this frame.
         if current_target is not None and current_target not in active:
-            # Track died while we were still on it — count it as visited.
             visited.add(current_target)
+            verify_reason.setdefault(current_target, "lost")
             current_target = None
             frames_on_current = 0
+            consec_good = 0
 
-        if args.planner == "coverage":
-            # Once we've lingered long enough, mark visited and free up target.
-            if current_target is not None and frames_on_current >= args.min_hold:
-                visited.add(current_target)
-                current_target = None
-                frames_on_current = 0
+        if args.planner in ("coverage", "verify"):
+            done = False
+            if current_target is not None:
+                if args.planner == "coverage":
+                    done = frames_on_current >= args.min_hold
+                    reason = "visited"
+                else:  # verify
+                    if consec_good >= args.verify_consec:
+                        done = True
+                        reason = "verified"
+                    elif frames_on_current >= args.max_hold:
+                        done = True
+                        reason = "timeout"
+                if done:
+                    visited.add(current_target)
+                    verify_reason[current_target] = reason
+                    current_target = None
+                    frames_on_current = 0
+                    consec_good = 0
             if current_target is None and active:
-                # Pick next unvisited track with the most life remaining, so
-                # we're likely to actually hold it for min_hold frames.
                 unvisited = [t for t in active if t not in visited]
                 if unvisited:
                     def rem(tid: str) -> int:
                         return per_track[tid]["died"] - fidx
                     current_target = max(unvisited, key=rem)
                     frames_on_current = 0
-                # If all visible are visited: current_target stays None
-                # -> EMA pans back to wide view until a new unvisited shows up.
+                    consec_good = 0
         else:  # sticky
             if active:
                 if current_target in active and frames_on_current < args.switch_cooldown:
@@ -225,10 +258,30 @@ def main():
             out = cv2.resize(crop, (args.out_w, args.out_h),
                              interpolation=cv2.INTER_LANCZOS4)
 
+        # --- Verify planner: run YOLO on the displayed viewport crop ---
+        max_conf = 0.0
+        if yolo is not None and current_target is not None:
+            # Use a downsized copy if out_w is big — YOLO wants 640x640 anyway.
+            crop_yolo = out if (args.out_w, args.out_h) == (640, 640) else \
+                cv2.resize(out, (640, 640))
+            r = yolo.predict(crop_yolo, classes=args.classes,
+                             conf=0.30, imgsz=640, half=True, verbose=False)[0]
+            if r.boxes is not None and len(r.boxes) > 0:
+                max_conf = float(r.boxes.conf.max().item())
+            if max_conf >= args.verify_conf:
+                consec_good += 1
+            else:
+                consec_good = 0
+
         if args.overlay:
-            # Small tag in the top-left
             label = f"PTZ  f={fidx}  visited={len(visited)}/{len(per_track)}  "
-            label += f"track#{current_target}" if current_target else "SCANNING"
+            if current_target is not None:
+                label += f"track#{current_target}"
+                if args.planner == "verify":
+                    label += f"  consec={consec_good}/{args.verify_consec}"
+                    label += f"  conf={max_conf:.2f}"
+            else:
+                label += "SCANNING"
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
             cv2.rectangle(out, (8, 8), (8 + tw + 10, 8 + th + 10), (0, 0, 0), -1)
             cv2.putText(out, label, (14, 8 + th + 4),
@@ -245,6 +298,10 @@ def main():
 
     cap.release()
     writer.release()
+    # Summary of visit reasons
+    from collections import Counter
+    reasons = Counter(verify_reason.values())
+    print(f"visits: {dict(reasons)}")
     print(f"wrote {args.out} in {time.time() - t0:.1f}s", flush=True)
 
 
