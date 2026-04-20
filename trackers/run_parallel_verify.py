@@ -242,6 +242,8 @@ def main():
     current_target: int | None = None
     frames_on_current = 0
     consec: dict[int, int] = {}
+    # Tracks the PTZ gave up on (timed out). Never re-picked as primary.
+    skip_primary: set[int] = set()
     stats = {"spawned": 0, "verified_primary": 0,
              "verified_transit": 0, "timeout": 0, "lost": 0}
 
@@ -347,16 +349,20 @@ def main():
                 current_target = None
                 frames_on_current = 0
         if current_target is None and unverified_alive:
-            # Proximity to current camera
-            cam_cx, cam_cy = ptz_state[0], ptz_state[1]
-            def key_prox(tid):
-                b = tracks[tid].last_box
-                bx = (b[0] + b[2]) / 2 * SCALE_X
-                by = (b[1] + b[3]) / 2 * SCALE_Y
-                return (bx - cam_cx) ** 2 + (by - cam_cy) ** 2
-            current_target = min(unverified_alive, key=key_prox)
-            frames_on_current = 0
-            consec.pop(current_target, None)
+            # Proximity to current camera, excluding tracks we've already
+            # given up on (timed out once — it's unlikely YOLO will suddenly
+            # verify at 0.85 what we couldn't in 1.5s).
+            eligible = [t for t in unverified_alive if t not in skip_primary]
+            if eligible:
+                cam_cx, cam_cy = ptz_state[0], ptz_state[1]
+                def key_prox(tid):
+                    b = tracks[tid].last_box
+                    bx = (b[0] + b[2]) / 2 * SCALE_X
+                    by = (b[1] + b[3]) / 2 * SCALE_Y
+                    return (bx - cam_cx) ** 2 + (by - cam_cy) ** 2
+                current_target = min(eligible, key=key_prox)
+                frames_on_current = 0
+                consec.pop(current_target, None)
 
         # --- 6. Compute PTZ target rect and EMA-smooth --------------------
         if current_target is not None:
@@ -424,10 +430,11 @@ def main():
             else:
                 consec[tid] = 0
 
-        # Timeout primary target
+        # Timeout primary target; blacklist so we don't loop back.
         if current_target is not None:
             if frames_on_current >= args.max_hold:
                 stats["timeout"] += 1
+                skip_primary.add(current_target)
                 current_target = None
                 frames_on_current = 0
 
