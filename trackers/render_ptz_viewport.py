@@ -42,6 +42,48 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
+def iou_xyxy(a, b) -> float:
+    x1 = max(a[0], b[0]); y1 = max(a[1], b[1])
+    x2 = min(a[2], b[2]); y2 = min(a[3], b[3])
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    inter = (x2 - x1) * (y2 - y1)
+    au = max(0.0, (a[2] - a[0]) * (a[3] - a[1]))
+    bu = max(0.0, (b[2] - b[0]) * (b[3] - b[1]))
+    u = au + bu - inter
+    return inter / u if u > 0 else 0.0
+
+
+def project_track_to_yolo(track_box_640, crop_rect_1080, yolo_size=640):
+    """Map a box in main-640 coords -> 1080p -> viewport crop -> 640x640 YOLO.
+    Returns (x1, y1, x2, y2) in YOLO-input coords, or None if the 1080p box
+    doesn't intersect the crop rect at all."""
+    cx1, cy1, cx2, cy2 = crop_rect_1080
+    cw = cx2 - cx1
+    ch = cy2 - cy1
+    if cw <= 0 or ch <= 0:
+        return None
+    # 640-main -> 1080p (SCALE_X=3.0, SCALE_Y=1.6875)
+    bx1 = track_box_640[0] * SCALE_X
+    by1 = track_box_640[1] * SCALE_Y
+    bx2 = track_box_640[2] * SCALE_X
+    by2 = track_box_640[3] * SCALE_Y
+    # Intersect with crop rect
+    ix1 = max(bx1, cx1); iy1 = max(by1, cy1)
+    ix2 = min(bx2, cx2); iy2 = min(by2, cy2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return None
+    # Map to YOLO input coords
+    sx = yolo_size / cw
+    sy = yolo_size / ch
+    return (
+        (ix1 - cx1) * sx,
+        (iy1 - cy1) * sy,
+        (ix2 - cx1) * sx,
+        (iy2 - cy1) * sy,
+    )
+
+
 def target_for_track(track_entry, fidx, out_aspect, box_fill=0.35):
     """Return (cx, cy, crop_w, crop_h) in 1080p coords framing the given
     track's current box. crop has aspect == out_aspect."""
@@ -128,6 +170,13 @@ def main():
     ap.add_argument("--yolo-weights", default="weights/yolo26x.pt")
     ap.add_argument("--classes", type=int, nargs="*",
                     default=[0, 1, 2, 3, 5, 7])
+    ap.add_argument("--picker", choices=["proximity", "lifespan"],
+                    default="proximity",
+                    help="How to pick next target: closest to camera (sweeps "
+                         "through clusters) or longest-remaining life")
+    ap.add_argument("--in-transit-iou", type=float, default=0.3,
+                    help="IoU between a YOLO det in the viewport and an "
+                         "unvisited track's projected box to count as a hit")
     ap.add_argument("--overlay", action="store_true", default=True,
                     help="Draw a small track-id tag on the viewport")
     ap.add_argument("--no-overlay", dest="overlay", action="store_false")
@@ -168,9 +217,10 @@ def main():
     state = list(wide_target(out_aspect))  # [cx, cy, crop_w, crop_h]
     current_target: str | None = None
     frames_on_current = 0
-    consec_good = 0
     visited: set[str] = set()
-    verify_reason: dict[str, str] = {}   # tid -> "verified" / "timeout" / "lost"
+    verify_reason: dict[str, str] = {}   # tid -> "verified" / "timeout" / "lost" / "transit"
+    # Per-track running consecutive-hit counter (reset on miss).
+    consec: dict[str, int] = {}
 
     # YOLO for the verify planner only.
     yolo = None
@@ -200,7 +250,7 @@ def main():
                     done = frames_on_current >= args.min_hold
                     reason = "visited"
                 else:  # verify
-                    if consec_good >= args.verify_consec:
+                    if consec.get(current_target, 0) >= args.verify_consec:
                         done = True
                         reason = "verified"
                     elif frames_on_current >= args.max_hold:
@@ -208,18 +258,33 @@ def main():
                         reason = "timeout"
                 if done:
                     visited.add(current_target)
-                    verify_reason[current_target] = reason
+                    verify_reason.setdefault(current_target, reason)
                     current_target = None
                     frames_on_current = 0
-                    consec_good = 0
             if current_target is None and active:
                 unvisited = [t for t in active if t not in visited]
                 if unvisited:
-                    def rem(tid: str) -> int:
-                        return per_track[tid]["died"] - fidx
-                    current_target = max(unvisited, key=rem)
+                    if args.picker == "proximity":
+                        # Distance from current camera center to track center
+                        # in 1080p coords.
+                        cam_cx = state[0]
+                        cam_cy = state[1]
+                        def key_prox(tid: str):
+                            entry = per_track[tid]["hist"].get(str(fidx))
+                            if entry is None:
+                                return (float("inf"), 0)
+                            x1, y1, x2, y2 = entry["box"]
+                            bx = (x1 + x2) / 2 * SCALE_X
+                            by = (y1 + y2) / 2 * SCALE_Y
+                            d = ((cam_cx - bx) ** 2 + (cam_cy - by) ** 2) ** 0.5
+                            rem = per_track[tid]["died"] - fidx
+                            return (d, -rem)
+                        current_target = min(unvisited, key=key_prox)
+                    else:
+                        def rem(tid: str) -> int:
+                            return per_track[tid]["died"] - fidx
+                        current_target = max(unvisited, key=rem)
                     frames_on_current = 0
-                    consec_good = 0
         else:  # sticky
             if active:
                 if current_target in active and frames_on_current < args.switch_cooldown:
@@ -259,27 +324,63 @@ def main():
                              interpolation=cv2.INTER_LANCZOS4)
 
         # --- Verify planner: run YOLO on the displayed viewport crop ---
+        # Run whenever we're on a target OR panning (so in-transit tracks can
+        # also opportunistically verify).
         max_conf = 0.0
-        if yolo is not None and current_target is not None:
-            # Use a downsized copy if out_w is big — YOLO wants 640x640 anyway.
+        transit_hits: list[str] = []
+        if yolo is not None and (current_target is not None or len(active) > 0):
             crop_yolo = out if (args.out_w, args.out_h) == (640, 640) else \
                 cv2.resize(out, (640, 640))
             r = yolo.predict(crop_yolo, classes=args.classes,
                              conf=0.30, imgsz=640, half=True, verbose=False)[0]
+            # Collect high-conf dets.
+            dets = []                    # list of (xyxy, conf)
             if r.boxes is not None and len(r.boxes) > 0:
                 max_conf = float(r.boxes.conf.max().item())
-            if max_conf >= args.verify_conf:
-                consec_good += 1
-            else:
-                consec_good = 0
+                for b in r.boxes:
+                    c = float(b.conf.item())
+                    if c >= args.verify_conf:
+                        dets.append((tuple(b.xyxy[0].tolist()), c))
+            # For every unvisited alive track (including current target),
+            # see if it projects into the current viewport and matches a
+            # high-conf detection there.
+            crop_rect_1080 = (x1, y1, x2, y2)
+            for tid in active:
+                if tid in visited:
+                    continue
+                entry = per_track[tid]["hist"].get(str(fidx))
+                if entry is None:
+                    continue
+                proj = project_track_to_yolo(entry["box"], crop_rect_1080)
+                if proj is None:
+                    consec[tid] = 0
+                    continue
+                # Match: highest-IoU det above threshold.
+                best_iou = 0.0
+                for db, _ in dets:
+                    iou = iou_xyxy(proj, db)
+                    if iou > best_iou:
+                        best_iou = iou
+                if best_iou >= args.in_transit_iou:
+                    consec[tid] = consec.get(tid, 0) + 1
+                    if tid != current_target and consec[tid] >= args.verify_consec:
+                        # Opportunistic verify mid-transit.
+                        visited.add(tid)
+                        verify_reason.setdefault(tid, "transit")
+                        transit_hits.append(tid)
+                else:
+                    consec[tid] = 0
 
         if args.overlay:
             label = f"PTZ  f={fidx}  visited={len(visited)}/{len(per_track)}  "
             if current_target is not None:
                 label += f"track#{current_target}"
                 if args.planner == "verify":
-                    label += f"  consec={consec_good}/{args.verify_consec}"
+                    c = consec.get(current_target, 0)
+                    label += f"  consec={c}/{args.verify_consec}"
                     label += f"  conf={max_conf:.2f}"
+                if transit_hits:
+                    label += f"  +transit:{','.join(transit_hits)}"
             else:
                 label += "SCANNING"
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
