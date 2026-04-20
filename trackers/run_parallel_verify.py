@@ -183,6 +183,7 @@ def main():
     ap.add_argument("--out-main", default="outputs/main_with_verify.mp4")
     ap.add_argument("--out-ptz",  default="outputs/ptz_view.mp4")
     ap.add_argument("--out-tracks", default="outputs/parallel_tracks.json")
+    ap.add_argument("--out-fps", type=float, default=120.0)
     ap.add_argument("--device", default="cuda:0")
     # Tracker behavior
     ap.add_argument("--spawn-conf", type=float, default=0.35)
@@ -226,15 +227,17 @@ def main():
     total = int(main_cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if args.max_frames:
         total = min(total, args.max_frames)
-    fps = main_cap.get(cv2.CAP_PROP_FPS) or 30.0
+    if args.out_fps <= 0:
+        raise SystemExit("--out-fps must be positive")
+    out_fps = float(args.out_fps)
 
     Path(args.out_main).parent.mkdir(parents=True, exist_ok=True)
     writer_main = cv2.VideoWriter(args.out_main,
                                   cv2.VideoWriter_fourcc(*"mp4v"),
-                                  fps, (MAIN_W, MAIN_H))
+                                  out_fps, (MAIN_W, MAIN_H))
     writer_ptz = cv2.VideoWriter(args.out_ptz,
                                  cv2.VideoWriter_fourcc(*"mp4v"),
-                                 fps, (args.out_w, args.out_h))
+                                 out_fps, (args.out_w, args.out_h))
 
     # State
     tracks: dict[int, MainTrack] = {}
