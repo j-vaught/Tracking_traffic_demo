@@ -37,6 +37,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lorat_wrapper import BatchedLoRAT
+from lorat_multigpu import MultiGPULoRAT
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +133,11 @@ def main():
     ap.add_argument("--variant", default="large-224",
                     choices=["base-224", "base-378", "large-224", "large-378",
                              "giant-224", "giant-378"])
-    ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--device", default="cuda:0",
+                    help="Single-GPU device; ignored if --gpus is set")
+    ap.add_argument("--gpus", default=None,
+                    help="Comma-separated GPU ids for multi-GPU track split "
+                         "(e.g. '0,1,2,3'). Overrides --device when set.")
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--max-tracks", type=int, default=80,
                     help="Cap on concurrent alive LoRAT tracks")
@@ -160,9 +165,16 @@ def main():
     yolo_by_frame = load_detections(args.yolo, "yolo")
     detr_by_frame = load_detections(args.detr, "detr")
 
-    engine = BatchedLoRAT(weights=args.weights, variant=args.variant,
-                          device=args.device, dtype=torch.float16,
-                          max_batch=args.batch)
+    if args.gpus:
+        gpu_ids = [int(g) for g in args.gpus.split(",") if g.strip()]
+        engine = MultiGPULoRAT(weights=args.weights, variant=args.variant,
+                               gpus=gpu_ids, dtype=torch.float16,
+                               max_batch_per_gpu=args.batch)
+        print(f"[lorat] multi-GPU on {gpu_ids}")
+    else:
+        engine = BatchedLoRAT(weights=args.weights, variant=args.variant,
+                              device=args.device, dtype=torch.float16,
+                              max_batch=args.batch)
 
     cap = cv2.VideoCapture(args.video)
     if not cap.isOpened():
@@ -207,7 +219,10 @@ def main():
                 tr.last_det_frame = fidx
                 tr.low_score_streak = 0
                 if det_match_iou >= args.reanchor_iou:
-                    engine._tracks[tid].last_box = det_match["xyxy"].astype(np.float64)
+                    if isinstance(engine, MultiGPULoRAT):
+                        engine.set_last_box(tid, det_match["xyxy"])
+                    else:
+                        engine._tracks[tid].last_box = det_match["xyxy"].astype(np.float64)
                     box = det_match["xyxy"].copy()
                 if (tr.lock is None
                         and det_match["conf"] >= args.lock_conf
